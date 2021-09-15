@@ -1,0 +1,700 @@
+name: CI
+on:
+  # always execute docker build when something is pushed to master or release-* branches
+  push:
+    branches:
+      - 'master'
+      - 'release-*'
+  # in addition, execute for pull requests to those branches
+  pull_request:
+    branches:
+      - 'master'
+      - 'release-*'
+  workflow_dispatch: # run CI when triggered manually
+env:
+  GO_VERSION: "^1.16"
+  KUBE_CONSTRAINTS: ">= 1.14, <= 1.21"
+  CLI_FOLDER: "cli/"
+  INSTALLER_FOLDER: "installer/"
+  
+  BRIDGE_ARTIFACT_PREFIX: "BRIDGE"
+  API_ARTIFACT_PREFIX: "API"
+  OS_ROUTE_SVC_ARTIFACT_PREFIX: "OS_ROUTE_SVC"
+  JMETER_SVC_ARTIFACT_PREFIX: "JMETER_SVC"
+  HELM_SVC_ARTIFACT_PREFIX: "HELM_SVC"
+  APPROVAL_SVC_ARTIFACT_PREFIX: "APPROVAL_SVC"
+  DISTRIBUTOR_ARTIFACT_PREFIX: "DISTRIBUTOR"
+  SHIPYARD_CONTROLLER_ARTIFACT_PREFIX: "SHIPYARD_CONTROLLER"
+  SECRET_SVC_ARTIFACT_PREFIX: "SECRET_SVC"
+  CONFIGURATION_SVC_ARTIFACT_PREFIX: "CONFIGURATION_SVC"
+  REMEDIATION_SVC_ARTIFACT_PREFIX: "REMEDIATION_SVC"
+  LIGHTHOUSE_SVC_ARTIFACT_PREFIX: "LIGHTHOUSE_SVC"
+  MONGODB_DS_ARTIFACT_PREFIX: "MONGODB_DS"
+  STATISTICS_SVC_ARTIFACT_PREFIX: "STATISTICS_SVC"
+
+  BRIDGE_ARTIFACT: "bridge2"
+  BRIDGE_FOLDER: "bridge/"
+
+  API_ARTIFACT: "api"
+  API_FOLDER: "api/"
+  API_TEST_FOLDERS: "./handlers/... ./utils/..."
+  API_GO_FLAGS: ""
+
+  OS_ROUTE_SVC_ARTIFACT: "openshift-route-service"
+  OS_ROUTE_SVC_FOLDER: "platform-support/openshift-route-service/"
+  OS_ROUTE_SVC_TEST_FOLDERS: "./..."
+  OS_ROUTE_SVC_GO_FLAGS: "-race"
+
+  JMETER_SVC_ARTIFACT: "jmeter-service"
+  JMETER_SVC_FOLDER: "jmeter-service/"
+  JMETER_SVC_TEST_FOLDERS: "./..."
+  JMETER_SVC_GO_FLAGS: "-race"
+
+  HELM_SVC_ARTIFACT: "helm-service"
+  HELM_SVC_FOLDER: "helm-service/"
+  HELM_SVC_TEST_FOLDERS: "./..."
+  HELM_SVC_GO_FLAGS: "-race"
+
+  APPROVAL_SVC_ARTIFACT: "approval-service"
+  APPROVAL_SVC_FOLDER: "approval-service/"
+  APPROVAL_SVC_TEST_FOLDERS: "./..."
+  APPROVAL_SVC_GO_FLAGS: "-race"
+
+  DISTRIBUTOR_ARTIFACT: "distributor"
+  DISTRIBUTOR_FOLDER: "distributor/"
+  DISTRIBUTOR_TEST_FOLDERS: "./..."
+  DISTRIBUTOR_GO_FLAGS: ""
+
+  SHIPYARD_CONTROLLER_ARTIFACT: "shipyard-controller"
+  SHIPYARD_CONTROLLER_FOLDER: "shipyard-controller/"
+  SHIPYARD_CONTROLLER_TEST_FOLDERS: "./..."
+  SHIPYARD_CONTROLLER_GO_FLAGS: ""
+
+  SECRET_SVC_ARTIFACT: "secret-service"
+  SECRET_SVC_FOLDER: "secret-service/"
+  SECRET_SVC_TEST_FOLDERS: "./..."
+  SECRET_SVC_GO_FLAGS: ""
+
+  CONFIGURATION_SVC_ARTIFACT: "configuration-service"
+  CONFIGURATION_SVC_FOLDER: "configuration-service/"
+  CONFIGURATION_SVC_TEST_FOLDERS: "./..."
+  CONFIGURATION_SVC_GO_FLAGS: ""
+
+  REMEDIATION_SVC_ARTIFACT: "remediation-service"
+  REMEDIATION_SVC_FOLDER: "remediation-service/"
+  REMEDIATION_SVC_TEST_FOLDERS: "./..."
+  REMEDIATION_SVC_GO_FLAGS: "-race"
+
+  LIGHTHOUSE_SVC_ARTIFACT: "lighthouse-service"
+  LIGHTHOUSE_SVC_FOLDER: "lighthouse-service/"
+  LIGHTHOUSE_SVC_TEST_FOLDERS: "./..."
+  LIGHTHOUSE_SVC_GO_FLAGS: ""
+
+  MONGODB_DS_ARTIFACT: "mongodb-datastore"
+  MONGODB_DS_FOLDER: "mongodb-datastore/"
+  MONGODB_DS_TEST_FOLDERS: "./..."
+  MONGODB_DS_GO_FLAGS: "-race"
+
+  STATISTICS_SVC_ARTIFACT: "statistics-service"
+  STATISTICS_SVC_FOLDER: "statistics-service/"
+  STATISTICS_SVC_TEST_FOLDERS: "./..."
+  STATISTICS_SVC_GO_FLAGS: "-race"
+defaults:
+  run:
+    shell: bash
+jobs:
+  prepare_ci_run:
+    name: Prepare CI Run
+    # Prepare CI Run looks at what has been changed in this commit/PR/... and determines which artifacts should be
+    # built afterwards (in other jobs that depend on this one).
+    runs-on: ubuntu-20.04
+    outputs: # declare what this job outputs (so it can be re-used for other jobs)
+      # build config
+      BUILD_EVERYTHING: ${{ steps.build_everything.outputs.BUILD_EVERYTHING }}
+      BUILD_INSTALLER: ${{ steps.check_modified_files.outputs.BUILD_INSTALLER }}
+      BUILD_BRIDGE: ${{ steps.check_modified_files.outputs.BUILD_BRIDGE }}
+      BUILD_CLI: ${{ steps.check_modified_files.outputs.BUILD_CLI }}
+      BUILD_MATRIX: ${{ steps.check_modified_files.outputs.BUILD_MATRIX }}
+      BUILD_MATRIX_EMPTY: ${{ steps.check_modified_files.outputs.BUILD_MATRIX_EMPTY }}
+      # metadata
+      GIT_SHA: ${{ steps.extract_branch.outputs.GIT_SHA }}
+      BRANCH: ${{ steps.extract_branch.outputs.BRANCH }}
+      BRANCH_SLUG: ${{ steps.extract_branch.outputs.BRANCH_SLUG }}
+      VERSION: ${{ steps.get_version.outputs.VERSION }}
+      RELEASE_BUILD: ${{ steps.get_version.outputs.RELEASE_BUILD }}
+      KEPTN_SPEC_VERSION: ${{ steps.get_version.outputs.KEPTN_SPEC_VERSION }}
+      DATE: ${{ steps.get_datetime.outputs.DATE }}
+      TIME: ${{ steps.get_datetime.outputs.TIME }}
+      DATETIME: ${{ steps.get_datetime.outputs.DATETIME }}
+      LAST_SUCCESSFUL_RUN_ID: ${{ steps.last_run_id.outputs.RUN_ID }}
+
+    steps:
+      - name: Prevent PR Build on Release Branch
+        # if you create a PR from release-* to anything else, there is usually a push-build in action, allowing
+        # us to cancel the PR build
+        if: github.event_name == 'pull_request'
+        run: |
+          if [[ "$GITHUB_HEAD_REF" == "release-"* ]]; then
+            echo "::error::Failing CI Build for Pull Request on purpose, as there is a push build"
+            exit 1
+          fi
+
+      - name: Check out code
+        uses: actions/checkout@v2.3.4
+        with:
+          fetch-depth: 0 # need to checkout "all commits" for certain features to work (e.g., get all changed files)
+          submodules: 'true'
+
+      - name: Get changed files
+        id: changed_files
+        uses: jitterbit/get-changed-files@v1
+        continue-on-error: true
+
+      - name: Prepare for build-everything run
+        if: (github.event_name == 'push') || (github.event_name == 'workflow_dispatch') || (contains(github.event.pull_request.labels.*.name, 'CI:trigger-build-everything'))
+        id: build_everything
+        run: |
+          BUILD_EVERYTHING=true
+          echo "##[set-output name=BUILD_EVERYTHING;]$(echo ${BUILD_EVERYTHING})"
+
+      - name: Prepare artifacts with changes
+        if: (github.event_name == 'pull_request') || (github.event_name == 'push')
+        id: check_modified_files
+        env:
+          BUILD_EVERYTHING: ${{ steps.build_everything.outputs.BUILD_EVERYTHING }}
+        run: |
+          ./gh-actions-scripts/prepare_changed_artifacts.sh "${{ steps.changed_files.outputs.all }}"
+
+      - name: Extract branch name
+        id: extract_branch
+        # see https://github.com/keptn/gh-action-extract-branch-name for details
+        uses: keptn/gh-action-extract-branch-name@main
+
+      - name: Find last successful run ID
+        if: steps.build_everything.outputs.BUILD_EVERYTHING == 'true'
+        id: last_run_id
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_SLUG: "keptn/keptn"
+          BRANCH_SLUG: ${{ steps.extract_branch.outputs.BRANCH_SLUG }}
+        run: |
+          BRANCH_NAME=""
+          if [[ "${GITHUB_REF}" == "refs/heads/"* ]]; then
+            BRANCH_NAME=${GITHUB_REF#refs/heads/}
+          elif [[ "${GITHUB_REF}" == "refs/pull/"* ]]; then
+            PR_NUMBER=${BRANCH_SLUG#PR-}
+            BRANCH_NAME=$(gh pr view "$PR_NUMBER" --json "headRefName" | jq -r '.headRefName')
+          fi
+          RUN_ID=$(curl -sLH 'Accept: application/vnd.github.v3+json' -H "Authorization: token $GITHUB_TOKEN" "api.github.com/repos/$REPO_SLUG/actions/workflows/CI.yml/runs?branch=$BRANCH" | jq -c '[.workflow_runs[] | select( .conclusion == "success" )][0] | .id')
+          echo "::set-output name=RUN_ID::$RUN_ID"
+          echo "Last successful run ID was: $RUN_ID"
+
+      - name: 'Get Previous tag'
+        id: get_previous_tag
+        uses: "WyriHaximus/github-action-get-previous-tag@v1.1"
+      - name: 'Get next patch version'
+        id: get_next_semver_tag
+        uses: "WyriHaximus/github-action-next-semvers@v1.1"
+        with:
+          version: ${{ steps.get_previous_tag.outputs.tag }}
+      - name: Get the version
+        id: get_version
+        env:
+          BRANCH: ${{ steps.extract_branch.outputs.BRANCH }}
+          BRANCH_SLUG: ${{ steps.extract_branch.outputs.BRANCH_SLUG }}
+        shell: bash
+        run: |
+          # determine version
+          GIT_LAST_TAG=${{ steps.get_previous_tag.outputs.tag }}
+          GIT_NEXT_TAG=${{ steps.get_next_semver_tag.outputs.patch }}
+          echo "GIT_LAST_TAG=${GIT_LAST_TAG}, GIT_NEXT_TAG=${GIT_NEXT_TAG}"
+          RELEASE_BUILD=false
+
+          if [[ "$BRANCH" == "release-"* ]]; then
+            # Release Branch: extract version from branch name
+            VERSION=${BRANCH#"release-"}
+            RELEASE_BUILD=true
+          elif [[ "$BRANCH" == "master" ]]; then
+            # master branch = latest
+            VERSION="${GIT_NEXT_TAG}-dev"
+          else
+            # Feature/Development Branch - use last tag with branch slug
+            VERSION="${GIT_NEXT_TAG}-dev-${BRANCH_SLUG}"
+          fi
+
+          # determine keptn spec version
+          git submodule update --init
+          cd specification
+          KEPTN_SPEC_VERSION=$(git describe --tags)
+
+          echo "VERSION=${VERSION}"
+          echo "KEPTN_SPEC_VERSION=${KEPTN_SPEC_VERSION}"
+
+          echo "::set-output name=VERSION::${VERSION}"
+          echo "::set-output name=KEPTN_SPEC_VERSION::${KEPTN_SPEC_VERSION}"
+          echo "::set-output name=RELEASE_BUILD::${RELEASE_BUILD}"
+      - name: Get current date and time
+        id: get_datetime
+        run: |
+          echo "::set-output name=DATE::$(date +'%Y%m%d')"
+          echo "::set-output name=TIME::$(date +'%H%M')"
+          echo "::set-output name=DATETIME::$(date +'%Y%m%d')$(date +'%H%M')"
+
+  store-output-in-build-config:
+    name: "Store output of last step in build-config.env"
+    needs: prepare_ci_run
+    runs-on: ubuntu-20.04
+    steps:
+      - name: Create build config file
+        env:
+          BRANCH: ${{ needs.prepare_ci_run.outputs.BRANCH }}
+          BRANCH_SLUG: ${{ needs.prepare_ci_run.outputs.BRANCH_SLUG }}
+          BUILD_EVERYTHING: ${{ needs.prepare_ci_run.outputs.BUILD_EVERYTHING }}
+          VERSION: ${{ needs.prepare_ci_run.outputs.VERSION }}
+          DATETIME: ${{ needs.prepare_ci_run.outputs.DATE }}${{ needs.prepare_ci_run.outputs.TIME }}
+          GIT_SHA: ${{ needs.prepare_ci_run.outputs.GIT_SHA }}
+        run: |
+          echo "BRANCH=${BRANCH}" >> build-config.env
+          echo "BRANCH_SLUG=${BRANCH_SLUG}" >> build-config.env
+          echo "BUILD_EVERYTHING=${BUILD_EVERYTHING}" >> build-config.env
+          echo "VERSION=${VERSION}" >> build-config.env
+          echo "DATETIME=${DATETIME}" >> build-config.env
+          echo "GIT_SHA=${GIT_SHA}" >> build-config.env
+
+      - name: Upload build config as artifact
+        id: upload_build_config
+        uses: actions/upload-artifact@v2
+        with:
+          name: build-config
+          path: build-config.env
+
+  ############################################################################
+  # Unit tests                                                               #
+  ############################################################################
+  unit-tests-go-microservices:
+    name: Unit Tests Go Microservices
+    needs: prepare_ci_run
+    runs-on: ubuntu-20.04
+    if: needs.prepare_ci_run.outputs.BUILD_MATRIX_EMPTY == 'false'
+    strategy:
+      matrix: ${{ fromJson(needs.prepare_ci_run.outputs.BUILD_MATRIX) }}
+    steps:
+      # Always skip this job for the bridge
+      - name: Set up Go 1.x
+        if: ((needs.prepare_ci_run.outputs.BUILD_EVERYTHING == 'true') || (matrix.config.should-run == 'true')) && (matrix.config.artifact != 'bridge2')
+        uses: actions/setup-go@v2
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Checkout Code
+        if: matrix.config.artifact != 'bridge2'
+        uses: actions/checkout@v2.3.4
+
+      # cache go modules
+      - if: ((needs.prepare_ci_run.outputs.BUILD_EVERYTHING == 'true') || (matrix.config.should-run == 'true')) && (matrix.config.artifact != 'bridge2')
+        uses: actions/cache@v2.1.6
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Test ${{ matrix.config.artifact }}
+        if: ((needs.prepare_ci_run.outputs.BUILD_EVERYTHING == 'true') || (matrix.config.should-run == 'true')) && (matrix.config.artifact != 'bridge2')
+        run: |
+          go test ${{ matrix.config.go-flags }} -coverprofile=coverage.txt -covermode=atomic -v ${{ matrix.config.test-folders }}
+          bash <(curl -s https://codecov.io/bash) -c -F ${{ matrix.config.artifact }}
+        working-directory: ${{ matrix.config.working-dir }}
+
+  unit-tests-node:
+    name: Unit Tests Bridge/NodeJS
+    needs: prepare_ci_run
+    if: (needs.prepare_ci_run.outputs.BUILD_EVERYTHING == 'true') || (needs.prepare_ci_run.outputs.BUILD_BRIDGE == 'true')
+    runs-on: ubuntu-20.04
+    steps:
+      - name: Set up Node
+        uses: actions/setup-node@v2.4.0
+        with:
+          node-version: 14
+      - name: Checkout Code
+        uses: actions/checkout@v2.3.4
+      - uses: actions/cache@v2.1.6
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+      - name: Install npm libs
+        run: |
+          npm install -g codecov
+          npm install -g libnpx@10.2.0
+      - name: Test
+        if: (needs.prepare_ci_run.outputs.BUILD_EVERYTHING == 'true') || (needs.prepare_ci_run.outputs.BUILD_BRIDGE == 'true')
+        run: |
+          npm install
+          npm run test
+        working-directory: ./bridge
+      - name: Coverage report
+        if: (needs.prepare_ci_run.outputs.BUILD_EVERYTHING == 'true') || (needs.prepare_ci_run.outputs.BUILD_BRIDGE == 'true')
+        run: bash <(curl -s https://codecov.io/bash) -c -F bridge
+
+
+  unit-tests-cli:
+    name: Unit Tests CLI (multi OS/arch)
+    needs: prepare_ci_run
+    if: (needs.prepare_ci_run.outputs.BUILD_EVERYTHING == 'true') || (needs.prepare_ci_run.outputs.BUILD_CLI == 'true')
+    strategy:
+      matrix:
+        platform: [ ubuntu-20.04 ] #, macOS-11.0, windows-2019 ]
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Set up Go 1.x
+        uses: actions/setup-go@v2
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Checkout Code
+        uses: actions/checkout@v2.3.4
+
+      # cache go modules
+      - uses: actions/cache@v2.1.6
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-cli-${{ hashFiles('cli/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-cli
+
+      - name: Test cli
+        run: make test-unit-cli # go test -race -v  -coverprofile=coverage.txt -covermode=atomic ./...
+
+      - name: Coverage report
+        run: bash <(curl -s https://codecov.io/bash) -c -F cli
+
+  ############################################################################
+  # Build CLI                                                                #
+  ############################################################################
+  build-cli:
+    name: Build Keptn CLI
+    needs: [prepare_ci_run, unit-tests-cli]
+    if: (needs.prepare_ci_run.outputs.BUILD_EVERYTHING == 'true') || (needs.prepare_ci_run.outputs.BUILD_CLI == 'true')
+    strategy:
+      matrix:
+        include: # see https://gist.github.com/asukakenji/f15ba7e588ac42795f421b48b8aede63#a-list-of-valid-goarch-values
+          - platform: "ubuntu-20.04"
+            GOOS: "linux"
+            GOARCH: "amd64"
+          - platform: "ubuntu-20.04"
+            GOOS: "linux"
+            GOARCH: "arm"
+          - platform: "ubuntu-20.04"
+            GOOS: "linux"
+            GOARCH: "arm64"
+          - platform: "macos-11" # cross-compiling the CLI for macOS does not work - see https://github.com/keptn/keptn/issues/2738
+            GOOS: "darwin"
+            GOARCH: "amd64"
+          - platform: "macos-11" # cross-compiling the CLI for macOS does not work - see https://github.com/keptn/keptn/issues/2738
+            GOOS: "darwin"
+            GOARCH: "arm64"
+          - platform: "ubuntu-20.04"
+            GOOS: "windows"
+            GOARCH: "amd64"
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Set up Go 1.x
+        uses: actions/setup-go@v2
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Checkout Code
+        uses: actions/checkout@v2.3.4
+      # cache go modules
+      - uses: actions/cache@v2.1.6
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-cli-${{ hashFiles('cli/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-cli
+      - name: Build cli
+        env:
+          PLATFORM: "${{ matrix.platform }}"
+          GOARCH: "${{ matrix.GOARCH }}"
+          GOOS: "${{ matrix.GOOS }}"
+          BRANCH: ${{ needs.prepare_ci_run.outputs.BRANCH }}
+          VERSION: ${{ needs.prepare_ci_run.outputs.VERSION }}
+          DATETIME: ${{ needs.prepare_ci_run.outputs.DATE }}${{ needs.prepare_ci_run.outputs.TIME }}
+          GIT_SHA: ${{ needs.prepare_ci_run.outputs.GIT_SHA }}
+        run: |
+          FILE_ENDING=""
+          # overwrite file ending for windows binaries
+          if [[ "$GOOS" == "windows" ]]; then
+            FILE_ENDING=".exe"
+          fi
+
+          # determine output file name based on version, go os, architecture
+          OUTPUT_EXECUTABLE_NAME="keptn-${VERSION}-${GOOS}-${GOARCH}${FILE_ENDING}"
+          OUTPUT_ARCHIVE_NAME="keptn-${VERSION}-${GOOS}-${GOARCH}" # no need for file-ending in the archive name
+
+          if [[ "$BRANCH" == "master" ]]; then
+            # use VERSION.DATETIME for the cli version (e.g., nightly build)
+            VERSION=${VERSION}.${DATETIME}
+          fi
+
+          if [[ "$GOOS" == "linux" ]]; then
+            # enable static build for linux
+            export CGO_ENABLED=0
+          fi
+
+          if [[ "$GOOS" == "darwin" ]]; then
+            # enable CGO for compiling docker credential helper natively
+            export CGO_ENABLED=1
+          fi
+
+          # build the binary using makefile
+          make build-cli OUTPUT_EXECUTABLE_NAME="$OUTPUT_EXECUTABLE_NAME"
+          # verify output file exists
+          ls bin/${OUTPUT_EXECUTABLE_NAME}
+
+          # create a .tar.gz archive of the binary
+          mkdir dist
+          tar -zcvf dist/${OUTPUT_ARCHIVE_NAME}.tar.gz -C bin ${OUTPUT_EXECUTABLE_NAME}
+      - name: Upload Keptn CLI as an artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: keptn-cli
+          path: dist/
+
+  ############################################################################
+  # Build Helm Charts (only relevant for build_everything)                   #
+  ############################################################################
+  helm_charts_build:
+    needs: prepare_ci_run
+    name: Build Helm Charts
+    if: (needs.prepare_ci_run.outputs.BUILD_EVERYTHING == 'true') || (needs.prepare_ci_run.outputs.BUILD_INSTALLER == 'true')
+    runs-on: ubuntu-20.04
+    env:
+      BRANCH: ${{ needs.prepare_ci_run.outputs.BRANCH }}
+      VERSION: ${{ needs.prepare_ci_run.outputs.VERSION }}
+      KEPTN_SPEC_VERSION: ${{ needs.prepare_ci_run.outputs.KEPTN_SPEC_VERSION }}
+      DATETIME: ${{ needs.prepare_ci_run.outputs.DATE }}${{ needs.prepare_ci_run.outputs.TIME }}
+      GIT_SHA: ${{ needs.prepare_ci_run.outputs.GIT_SHA }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v2.3.4
+
+      - name: Build Helm Charts
+        id: build_helm_charts
+        run: |
+          if [[ "$BRANCH" == "master" ]] || [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            # use VERSION.DATETIME for the image tag (e.g., nightly build)
+            ./gh-actions-scripts/build_helm_charts.sh "${VERSION}" "${VERSION}.${DATETIME}" "${KEPTN_SPEC_VERSION}"
+          else
+            # just use VERSION for the image tag
+            ./gh-actions-scripts/build_helm_charts.sh "${VERSION}" "${VERSION}" "${KEPTN_SPEC_VERSION}"
+          fi
+
+      - name: Upload Helm Chart as an artifact
+        id: upload_helm_chart
+        uses: actions/upload-artifact@v2
+        with:
+          name: keptn-installer
+          path: keptn-charts/*.tgz
+
+  ############################################################################
+  # Build Docker Images                                                      #
+  ############################################################################
+  prepare_github_pr_comment:
+    needs: [prepare_ci_run, unit-tests-go-microservices]
+    name: Prepare GitHub Report Comment
+    runs-on: ubuntu-20.04
+    steps:
+      - name: Create PR comment
+        if: (github.event_name == 'pull_request') && (github.event.pull_request.head.repo.full_name == github.repository)
+        # only run if this is not a fork - see https://github.com/marocchino/sticky-pull-request-comment/issues/227
+        # note: GH does not allow to access secrets for PRs from a forked repositories due to security reasons
+        # that's fine, but it means we can't comment on the PR in this case
+        uses: marocchino/sticky-pull-request-comment@v2.1.1
+        continue-on-error: true
+        with:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          message: "Docker Build Report"
+          recreate: true
+
+  docker_build:
+    needs: [prepare_ci_run, unit-tests-go-microservices, prepare_github_pr_comment]
+    name: Docker Build
+    runs-on: ubuntu-20.04
+    if: needs.prepare_ci_run.outputs.BUILD_MATRIX_EMPTY == 'false'
+    strategy:
+      matrix: ${{ fromJson(needs.prepare_ci_run.outputs.BUILD_MATRIX) }}
+    env:
+      BRANCH: ${{ needs.prepare_ci_run.outputs.BRANCH }}
+      VERSION: ${{ needs.prepare_ci_run.outputs.VERSION }}
+      DATETIME: ${{ needs.prepare_ci_run.outputs.DATE }}${{ needs.prepare_ci_run.outputs.TIME }}
+      GIT_SHA: ${{ needs.prepare_ci_run.outputs.GIT_SHA }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v2.3.4
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v1
+        # only run docker login on pushes; also for PRs, but only if this is not a fork
+        if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository)
+        # note: GH does not allow to access secrets for PRs from a forked repositories due to security reasons
+        # that's fine, but it means we can't push images to dockerhub
+        with:
+          username: ${{ secrets.REGISTRY_USER }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v1
+        # only run docker login on pushes; also for PRs, but only if this is not a fork
+        if: needs.prepare_ci_run.outputs.RELEASE_BUILD == 'true' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository)
+        # note: GH does not allow to access secrets for PRs from a forked repositories due to security reasons
+        # that's fine, but it means we can't push images to dockerhub
+        with:
+          registry: "ghcr.io"
+          username: "keptn-bot"
+          password: ${{ secrets.KEPTN_BOT_TOKEN }}
+
+      - name: Login to Quay.io
+        uses: docker/login-action@v1
+        # only run docker login on pushes; also for PRs, but only if this is not a fork
+        if: needs.prepare_ci_run.outputs.RELEASE_BUILD == 'true' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository)
+        # note: GH does not allow to access secrets for PRs from a forked repositories due to security reasons
+        # that's fine, but it means we can't push images to dockerhub
+        with:
+          registry: "quay.io"
+          username: ${{ secrets.QUAY_USER }}
+          password: ${{ secrets.QUAY_TOKEN }}
+
+      - id: docker_cache
+        name: Docker Cache
+        if: matrix.config.should-run == 'true' || ( needs.prepare_ci_run.outputs.BUILD_EVERYTHING == 'true' && needs.prepare_ci_run.outputs.LAST_SUCCESSFUL_RUN_ID == 'null' )
+        uses: satackey/action-docker-layer-caching@v0.0.11
+        continue-on-error: true
+        with:
+          key: docker-build-cache-${{ github.workflow }}-{hash}
+          restore-keys: |
+            docker-build-cache-${{ github.workflow }}
+
+      - id: docker_build_image
+        name: "Docker Build keptn/${{ matrix.config.artifact }}"
+        if: matrix.config.should-run == 'true' || ( needs.prepare_ci_run.outputs.BUILD_EVERYTHING == 'true' && needs.prepare_ci_run.outputs.LAST_SUCCESSFUL_RUN_ID == 'null' )
+        env:
+          VERSION: ${{ env.VERSION }}
+          DATETIME: ${{ env.DATETIME }}
+          IMAGE: keptn/${{ matrix.config.artifact }}
+          DOCKER_FOLDER: ${{ matrix.config.working-dir }}
+          RELEASE_BUILD: ${{ needs.prepare_ci_run.outputs.RELEASE_BUILD }}
+        run: |
+          docker build "${DOCKER_FOLDER}" -t "${IMAGE}:${VERSION}.${DATETIME}" -t "${IMAGE}:${VERSION}" --build-arg version="${VERSION}"
+          docker push "${IMAGE}:${VERSION}.${DATETIME}" && docker push "${IMAGE}:${VERSION}"
+
+          if [[ $? -ne 0 ]]; then
+            echo "::warning file=${DOCKER_FOLDER}/Dockerfile::Failed to push ${IMAGE}:${VERSION}.${DATETIME} to DockerHub, continuing anyway"
+            report="* Failed to push ${IMAGE}:${VERSION}.${DATETIME} and ${IMAGE}:${VERSION} (Source: ${DOCKER_FOLDER})"
+          else
+            report="* Pushed ${IMAGE}:${VERSION}.${DATETIME} and ${IMAGE}:${VERSION} (Source: ${DOCKER_FOLDER})"
+          fi
+
+          echo "DOCKER_BUILD_REPORT=${report}" >> $GITHUB_ENV
+
+          if [[ $RELEASE_BUILD == 'true' ]]; then
+            DOCKER_REGISTRIES=('ghcr.io' 'quay.io')
+            for DOCKER_REGISTRY in "${DOCKER_REGISTRIES}"; do
+              NEW_TAG="$DOCKER_REGISTRY/$IMAGE:$VERSION"
+              docker tag "$IMAGE:$VERSION" "$NEW_TAG"
+              docker push "$NEW_TAG"
+            done
+          fi
+
+      - name: "Download Build Config from last successful build"
+        uses: dawidd6/action-download-artifact@v2.14.1
+        id: download_last_build_config
+        if: matrix.config.should-run == 'false' && needs.prepare_ci_run.outputs.BUILD_EVERYTHING == 'true' && needs.prepare_ci_run.outputs.LAST_SUCCESSFUL_RUN_ID != 'null'
+        with:
+          # Download last successful artifact from a CI build
+          github_token: ${{secrets.GITHUB_TOKEN}}
+          workflow: CI.yml
+          run_id: ${{ needs.prepare_ci_run.outputs.LAST_SUCCESSFUL_RUN_ID }}
+          name: build-config
+          # directory where to extract artifacts to
+          path: ./last-build-config
+
+      - id: docker_retag_image
+        name: "Docker Retag keptn/${{ matrix.config.artifact }}"
+        if: matrix.config.should-run == 'false' && needs.prepare_ci_run.outputs.BUILD_EVERYTHING == 'true' && needs.prepare_ci_run.outputs.LAST_SUCCESSFUL_RUN_ID != 'null'
+        env:
+          VERSION: ${{ env.VERSION }}
+          DATETIME: ${{ env.DATETIME }}
+          IMAGE: keptn/${{ matrix.config.artifact }}
+          DOCKER_FOLDER: ${{ matrix.config.working-dir }}
+          CONTENT_TYPE: "application/vnd.docker.distribution.manifest.v2+json"
+          RELEASE_BUILD: ${{ needs.prepare_ci_run.outputs.RELEASE_BUILD }}
+        run: |
+          # Fetch last image datetime from build config
+          LAST_DATETIME=$(grep 'DATETIME' "./last-build-config/build-config.env" | cut -d '=' -f2)
+          OLD_TAG="${VERSION}.${LAST_DATETIME}"
+
+          # Pull previous image
+          if docker pull "${IMAGE}:${VERSION}.${LAST_DATETIME}" -q; then
+            OLD_IMAGE="${IMAGE}:${VERSION}.${LAST_DATETIME}"
+          elif docker pull "${IMAGE}:${VERSION}" -q; then
+            OLD_IMAGE="${IMAGE}:${VERSION}"
+          else
+            # No previous image was found, need to build from scratch
+            echo "No previous image was found, building new image"
+            docker build "${DOCKER_FOLDER}" -t "${IMAGE}:${VERSION}.${DATETIME}" -t "${IMAGE}:${VERSION}" --build-arg version="${VERSION}"
+            OLD_IMAGE="${IMAGE}:${VERSION}"
+          fi
+
+          # Retag previous image
+          NEW_TAG1="${IMAGE}:${VERSION}.${DATETIME}"
+          NEW_TAG2="${IMAGE}:${VERSION}"
+
+          echo "ℹ️ Re-Tagging ${IMAGE} from old tag ${OLD_TAG} to new tags ${NEW_TAG1}, ${NEW_TAG2}"
+          docker tag "${OLD_IMAGE}" "${NEW_TAG1}"
+          docker tag "${OLD_IMAGE}" "${NEW_TAG2}"
+
+          # Push newly tagged image
+          docker push "${NEW_TAG1}" && docker push "${NEW_TAG2}"
+
+          report="* Retagged unchanged image ${IMAGE} with ${NEW_TAG1} and ${NEW_TAG2} (Source: ${DOCKER_FOLDER})"
+          echo "DOCKER_BUILD_REPORT=$report" >> "$GITHUB_ENV"
+
+          if [[ $RELEASE_BUILD == 'true' ]]; then
+            DOCKER_REGISTRIES=('ghcr.io' 'quay.io')
+            for DOCKER_REGISTRY in "${DOCKER_REGISTRIES[@]}"; do
+              NEW_TAG="$DOCKER_REGISTRY/${IMAGE}:${VERSION}"
+              docker tag "${OLD_IMAGE}" "${NEW_TAG}"
+              docker push "${NEW_TAG}"
+            done
+          fi
+
+      - name: Report Docker Build to PR
+        if: always() && (github.event_name == 'pull_request') && (github.event.pull_request.head.repo.full_name == github.repository)
+        # only run if this is not a fork - see https://github.com/marocchino/sticky-pull-request-comment/issues/227
+        # note: GH does not allow to access secrets for PRs from a forked repositories due to security reasons
+        # that's fine, but it means we can't comment on the PR in this case
+        uses: marocchino/sticky-pull-request-comment@v2.1.1
+        continue-on-error: true
+        with:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          message: ${{ env.DOCKER_BUILD_REPORT }}
+          append: true
+
+      - name: Delete PR comment on failure
+        if: failure() && (github.event_name == 'pull_request') && (github.event.pull_request.head.repo.full_name == github.repository)
+        # only run if this is not a fork - see https://github.com/marocchino/sticky-pull-request-comment/issues/227
+        # note: GH does not allow to access secrets for PRs from a forked repositories due to security reasons
+        # that's fine, but it means we can't comment on the PR in this case
+        uses: marocchino/sticky-pull-request-comment@v2.1.1
+        continue-on-error: true
+        with:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          delete: true
+
+      - id: docker_logout
+        if: always()
+        name: Docker logout
+        run: |
+          docker logout

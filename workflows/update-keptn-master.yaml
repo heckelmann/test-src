@@ -1,0 +1,35 @@
+name: Sync keptn to claus
+on:
+  schedule:
+    # * is a special character in YAML so you have to quote this string
+    - cron:  '0 1 * * *'
+  workflow_dispatch:
+
+jobs:
+  sync_latest_from_upstream:
+    runs-on: ubuntu-latest
+    name: Sync latest commits from upstream repo
+
+    steps:
+    # REQUIRED step
+    # Step 1: run a standard checkout action, provided by github
+    - name: Checkout target repo
+      uses: actions/checkout@v2
+      with:
+        # optional: set the branch to checkout,
+        # sync action checks out your 'target_sync_branch' anyway
+        ref:  keptn-master
+        # REQUIRED if your upstream repo is private (see wiki)
+        persist-credentials: false
+
+    # REQUIRED step
+    # Step 2: run the sync action
+    - name: Sync upstream changes
+      id: sync
+      uses: heckelmann/sync-upstream-repo@main
+      with:
+        remote-repository: https://github.com/keptn/keptn.git
+        # REQUIRED 'target_repo_token' exactly like this!
+        auth-token: ${{ secrets.GH_SYNC_TOKEN }}
+        remote-ref: master
+        target-ref: keptn-master
